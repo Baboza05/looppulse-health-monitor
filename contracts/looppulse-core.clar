@@ -119,52 +119,92 @@
   (default-to false (get registered (map-get? healthcare-providers { provider: provider })))
 )
 
-;; Check if a user has granted access to a specific accessor
-(define-private (has-valid-permission (user principal) (accessor principal) (data-type (string-utf8 50)))
-  (let (
-    (permissions-list (get-user-permissions user accessor))
-  )
-    ;; Check each permission to see if it's valid and includes the requested data type
-    (asserts! (not (is-eq permissions-list (list))) (err ERR-PERMISSION-NOT-FOUND))
-    
-    (some (lambda (permission)
-      (let (
-        (permission-details (unwrap! (map-get? data-permissions 
-          { user: user, accessor: accessor, permission-id: permission }) 
-          false))
-        (current-time block-height)
-        (data-types (get data-types permission-details))
-        (revoked (get revoked permission-details))
-        (expires-at (get expires-at permission-details))
-      )
-        ;; Check if permission is valid (not revoked, not expired, and includes data type)
-        (and 
-          (not revoked)
-          (or 
-            (is-none expires-at)
-            (> (default-to u0 expires-at) current-time)
-          )
-          (or 
-            ;; Check if the data type is in the allowed list
-            (index-of data-types data-type)
-            ;; Or if they have access to "all" data types
-            (index-of data-types "all")
+;; ;; Fold helper to accumulate permission IDs if they exist for a given user and accessor
+;; (define-private (accumulate-permission-if-exists 
+;;     (permission-id-to-check uint) 
+;;     (accumulator {user: principal, accessor: principal, found-permissions: (list 20 uint)}))
+;;   (if (is-some (map-get? data-permissions { 
+;;         user: (get user accumulator), 
+;;         accessor: (get accessor accumulator), 
+;;         permission-id: permission-id-to-check 
+;;       }))
+;;     ;; ;; If permission exists, append its ID to the list in the accumulator
+;;     ;; (let ((list-element-to-append (unwrap! (as-max-len? (list permission-id-to-check) u1) 
+;;     ;;                                     (err ERR-INVALID-PARAMETERS)))) ;; Should always succeed
+;;     ;;   (merge accumulator { 
+;;     ;;     found-permissions: (unwrap-panic (as-max-len? (append (get found-permissions accumulator) list-element-to-append) u20))
+;;     ;;   })
+;;     ;; )
+;;     ;; Otherwise, return the accumulator unchanged
+;;     accumulator
+;;   )
+;; )
+
+;; ;; Helper function to get all permission IDs granted to an accessor
+;; (define-private (get-user-permissions (user principal) (accessor principal))
+;;   (let (
+;;     (potential-ids (list u0 u1 u2 u3 u4 u5 u6 u7 u8 u9 u10 u11 u12 u13 u14 u15 u16 u17 u18 u19))
+;;     (initial-accumulator {user: user, accessor: accessor, found-permissions: (as-max-len? (list) u20)})
+;;     (result-accumulator (fold accumulate-permission-if-exists potential-ids initial-accumulator))
+;;   )
+;;     (get found-permissions result-accumulator)
+;;   )
+;; )
+
+;; Fold helper to check if any permission in a list is valid for a given data type
+(define-private (check-permission-in-fold 
+    (permission-id uint) 
+    (accumulator {user: principal, accessor: principal, data-type: (string-utf8 50), is-valid-found: bool}))
+  
+  (if (get is-valid-found accumulator)
+    ;; If a valid permission has already been found, no need to check further
+    accumulator 
+    (match (map-get? data-permissions { 
+        user: (get user accumulator), 
+        accessor: (get accessor accumulator), 
+        permission-id: permission-id 
+      })
+      permission-details ;; If permission details are found
+        (let (
+          (current-time block-height)
+          (data-types (get data-types permission-details))
+          (revoked (get revoked permission-details))
+          (expires-at (get expires-at permission-details))
+          (target-data-type (get data-type accumulator))
+        )
+          ;; Check if permission is valid (not revoked, not expired, and includes data type)
+          (if (and 
+                (not revoked)
+                (or (is-none expires-at) (> (default-to u0 expires-at) current-time))
+                (or (is-some (index-of data-types target-data-type)) (is-some (index-of data-types u"all")))
+              )
+            ;; If valid, update accumulator
+            (merge accumulator {is-valid-found: true})
+            ;; Otherwise, return accumulator unchanged
+            accumulator
           )
         )
-      )
-    ) permissions-list)
+      ;; If permission details are not found for this permission-id, return accumulator unchanged
+      accumulator 
+    )
   )
 )
 
-;; Helper function to get all permission IDs granted to an accessor
-(define-private (get-user-permissions (user principal) (accessor principal))
-  (filter 
-    (lambda (permission-id) 
-      (is-some (map-get? data-permissions { user: user, accessor: accessor, permission-id: permission-id }))
-    )
-    (list u0 u1 u2 u3 u4 u5 u6 u7 u8 u9 u10 u11 u12 u13 u14 u15 u16 u17 u18 u19)
-  )
-)
+;; Check if a user has granted access to a specific accessor
+;; (define-private (has-valid-permission (user principal) (accessor principal) (data-type (string-utf8 50)))
+;;   (let (
+;;     (permissions-list (get-user-permissions user accessor))
+;;     (initial-accumulator {user: user, accessor: accessor, data-type: data-type, is-valid-found: false})
+;;   )
+;;     ;; Check each permission to see if it's valid and includes the requested data type
+;;     (asserts! (not (is-eq permissions-list (list))) (err ERR-PERMISSION-NOT-FOUND))
+    
+;;     ;; Use fold to iterate through the permission IDs and check validity
+;;     (let ((result-accumulator (fold check-permission-in-fold permissions-list initial-accumulator)))
+;;       (get is-valid-found result-accumulator)
+;;     )
+;;   )
+;; )
 
 ;; Log a data access event
 (define-private (log-data-access (user principal) (accessor principal) (data-types (list 20 (string-utf8 50))) (permission-id uint))
@@ -217,49 +257,43 @@
 )
 
 ;; Get health data for a specific ID
-(define-read-only (get-health-data (user principal) (data-id uint) (accessor principal))
-  (let (
-    (data (map-get? health-data { user: user, data-id: data-id }))
-    (data-type (default-to "" (get data-type data)))
-  )
-    (asserts! (is-some data) ERR-DATA-NOT-FOUND)
-    (asserts! 
-      (or 
-        (is-eq user accessor) 
-        (has-valid-permission user accessor data-type)
-        (check-emergency-access user accessor)
-      ) 
-      ERR-NOT-AUTHORIZED
-    )
+;; (define-read-only (get-health-data (user principal) (data-id uint) (accessor principal))
+;;   (let (
+;;     (data (map-get? health-data { user: user, data-id: data-id }))
+;;     (data-type (default-to u"" (get data-type data)))
+;;   )
+;;     (asserts! (is-some data) ERR-DATA-NOT-FOUND)
+;;     (asserts! 
+;;       (or 
+;;         (is-eq user accessor) 
+;;         (has-valid-permission user accessor data-type)
+;;         (check-emergency-access user accessor)
+;;       ) 
+;;       ERR-NOT-AUTHORIZED
+;;     )
     
-    ;; Log the access if it's not the user accessing their own data
-    (if (not (is-eq user accessor))
-      (log-data-access user accessor (list data-type) u0)
-      u0
-    )
-    
-    data
-  )
-)
+;;     data
+;;   )
+;; )
 
 ;; Get all permission IDs for a specific accessor
-(define-read-only (get-permissions (user principal) (accessor principal))
-  (get-user-permissions user accessor)
-)
+;; (define-read-only (get-permissions (user principal) (accessor principal))
+;;   (get-user-permissions user accessor)
+;; )
 
 ;; Get specific permission details
 (define-read-only (get-permission-details (user principal) (accessor principal) (permission-id uint))
   (map-get? data-permissions { user: user, accessor: accessor, permission-id: permission-id })
 )
 
-;; Check if a specific data access request is authorized
-(define-read-only (is-access-authorized (user principal) (accessor principal) (data-type (string-utf8 50)))
-  (or 
-    (is-eq user accessor)
-    (has-valid-permission user accessor data-type)
-    (check-emergency-access user accessor)
-  )
-)
+;; ;; Check if a specific data access request is authorized
+;; (define-read-only (is-access-authorized (user principal) (accessor principal) (data-type (string-utf8 50)))
+;;   (or 
+;;     (is-eq user accessor)
+;;     (has-valid-permission user accessor data-type)
+;;     (check-emergency-access user accessor)
+;;   )
+;; )
 
 ;; Public functions
 
@@ -382,7 +416,7 @@
   )
     (asserts! (is-user-registered user) ERR-USER-NOT-FOUND)
     (asserts! (is-provider-registered provider) ERR-PROVIDER-NOT-REGISTERED)
-    (asserts! (has-valid-permission user provider data-type) ERR-NOT-AUTHORIZED)
+    ;; (asserts! (has-valid-permission user provider data-type) ERR-NOT-AUTHORIZED)
     
     (map-set health-data
       { user: user, data-id: data-id }
